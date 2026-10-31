@@ -1,2 +1,0 @@
-python-mpv>=1.0.5    # libmpv 바인딩. 별도로 libmpv-2.dll 필요 (README 참고)
-imageio-ffmpeg>=0.4.9  # GIF→MP4 변환 / 해상도 최적화용 ffmpeg (PATH에 ffmpeg가 있으면 생략 가능)
