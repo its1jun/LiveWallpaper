@@ -52,6 +52,7 @@ for _name, _res, _args in [
     ("GetClassNameW", _INT, [_HWND, wintypes.LPWSTR, _INT]),
     ("GetWindowThreadProcessId", wintypes.DWORD, [_HWND, ctypes.POINTER(wintypes.DWORD)]),
     ("SystemParametersInfoW", wintypes.BOOL, [_UINT, _UINT, ctypes.c_void_p, _UINT]),
+    ("ShowWindow", wintypes.BOOL, [_HWND, _INT]),
     ("DestroyWindow", wintypes.BOOL, [_HWND]),
     ("DefWindowProcW", ctypes.c_ssize_t, [_HWND, _UINT, wintypes.WPARAM, wintypes.LPARAM]),
     ("CreateWindowExW", _HWND,
@@ -95,6 +96,8 @@ SWP_NOACTIVATE, SWP_SHOWWINDOW = 0x0010, 0x0040
 HWND_BOTTOM, HWND_MESSAGE = wintypes.HWND(1), wintypes.HWND(-3)
 BLACK_BRUSH, LWA_ALPHA = 4, 0x2
 SM_CXSCREEN, SM_CYSCREEN = 0, 1
+SM_CMONITORS = 80
+SW_HIDE, SW_SHOWNA = 0, 8
 
 
 def enable_dpi_awareness():
@@ -215,6 +218,18 @@ def destroy_window(hwnd: int):
         user32.DestroyWindow(hwnd)
 
 
+def hide_window(hwnd: int):
+    """호스트 창을 파괴하지 않고 숨긴다 (정적 배경 전환용). 부착 상태는 그대로 유지된다."""
+    if hwnd:
+        user32.ShowWindow(hwnd, SW_HIDE)
+
+
+def show_window(hwnd: int):
+    """숨겼던 호스트 창을 활성화 없이 다시 표시한다."""
+    if hwnd:
+        user32.ShowWindow(hwnd, SW_SHOWNA)
+
+
 def _find_progman():
     progman = user32.FindWindowW("Progman", None)
     if progman:
@@ -298,6 +313,33 @@ def attach_to_desktop(hwnd: int):
         except Exception as e:  # noqa: BLE001
             errors.append(f"{method.__name__}: {e}")
     return False, " / ".join(errors)
+
+
+# ======================= 1-b. Windows 바탕화면 이미지 (정적 배경 전환용) =======================
+SPI_GETDESKWALLPAPER, SPI_SETDESKWALLPAPER = 0x0073, 0x0014
+SPIF_UPDATEINIFILE, SPIF_SENDWININICHANGE = 0x01, 0x02
+
+
+def get_desktop_wallpaper() -> str:
+    """현재 Windows 바탕화면 이미지 경로. 단색 배경이거나 실패하면 빈 문자열.
+    Uncertain: 슬라이드쇼/일부 Windows 버전에서는 원본이 아닌 TranscodedWallpaper 경로가 올 수 있다."""
+    buf = ctypes.create_unicode_buffer(1024)
+    if user32.SystemParametersInfoW(SPI_GETDESKWALLPAPER, len(buf), buf, 0):
+        return buf.value
+    return ""
+
+
+def set_desktop_wallpaper(path: str) -> bool:
+    """Windows 바탕화면 이미지를 path로 바꾼다. 사용자 프로필에 저장(UPDATEINIFILE)되므로
+    비정상 종료 뒤에도 남는다 → 복원은 snapshot.WallpaperSwapper가 상태 파일로 책임진다."""
+    buf = ctypes.create_unicode_buffer(path)
+    return bool(user32.SystemParametersInfoW(
+        SPI_SETDESKWALLPAPER, 0, buf, SPIF_UPDATEINIFILE | SPIF_SENDWININICHANGE))
+
+
+def monitor_count() -> int:
+    """연결된 모니터 수 (가상 화면 기준). 실패하면 1로 간주하지 않고 0을 돌려준다."""
+    return int(user32.GetSystemMetrics(SM_CMONITORS))
 
 
 # ======================= 2. 바탕화면이 가려졌는지 =======================

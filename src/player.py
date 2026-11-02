@@ -6,6 +6,8 @@ Python으로 픽셀이 넘어오지 않으므로 CPU·RAM 사용이 가장 낮�
   suspend(): mpv 인스턴스를 완전히 종료 (디코더, GPU 컨텍스트, 파일 핸들 모두 해제) → 설정 창 미리보기용
   pause()  : 일시정지만 (디코더 유지) → 배경화면이 가려졌을 때 사용. 재개 시 같은 자리에서 이어짐
   resume() : 일시정지 해제, 또는 종료된 상태면 다시 시작
+  resume(on_ready) : 종료된 상태에서 다시 시작할 때 첫 화면이 준비되면 on_ready()를 부른다.
+             항상 영상 처음부터 재생한다 (정적 배경 = 첫 프레임 → 라이브 전환이 이어져 보이도록)
 
 Uncertain: 바탕화면(Progman) 자식 + layered 창 안에서 mpv의 자식 창이 실제로 보이는지는 Windows에서 확인되지 않음.
 """
@@ -90,6 +92,7 @@ class Player:
         self._player = None
         self._paused = False
         self._reported = False
+        self._on_ready = None       # resume(on_ready)로 받은 콜백 (mpv 스레드에서 호출됨)
 
     # ---- 내부 ----
     def _ensure_player(self) -> bool:
@@ -110,7 +113,22 @@ class Player:
                 self._report(f"mpv initialization failed: {e2} (previous attempt: {e})")
                 return False
         _apply_fit(self._player, self._fit)
+        self._register_events(self._player)
         return True
+
+    def _register_events(self, p):
+        """첫 화면이 준비되면(playback-restart) on_ready를 한 번만 부른다.
+        Uncertain: playback-restart가 첫 화면 표시 직후에 오는지는 Windows 실기기에서 미검증 (안 와도 wallpaper.py의 시간 제한이 처리)."""
+        @p.event_callback("playback-restart")
+        def _restarted(_event):
+            if p is not self._player:   # 이미 종료 중인 이전 mpv의 이벤트는 무시
+                return
+            cb, self._on_ready = self._on_ready, None
+            if cb:
+                try:
+                    cb()
+                except Exception:  # noqa: BLE001  콜백 오류가 mpv 이벤트 스레드를 죽이지 않게
+                    pass
 
     def _on_log(self, level, prefix, text):
         if level in ("error", "fatal"):
@@ -152,6 +170,7 @@ class Player:
         UI 스레드는 들어오는 동기 메시지를 계속 처리한다 (최대 3초, 넘으면 포기하고 계속 진행)."""
         p, self._player = self._player, None
         self._paused = False
+        self._on_ready = None
         if not p:
             return
 
@@ -173,12 +192,18 @@ class Player:
                     pass
             t.join(0.02)
 
-    def resume(self):
+    def resume(self, on_ready=None):
+        """종료된 상태면 처음부터 다시 시작하고, 첫 화면이 준비되면 on_ready()를 mpv 스레드에서 한 번 호출한다.
+        이미 재생 중/일시정지 상태라면 기다릴 것이 없으므로 바로 호출한다."""
         if not self._player:
+            self._on_ready = on_ready
             self._start()
-        elif self._paused:
+            return
+        if self._paused:
             self._player.pause = False
             self._paused = False
+        if on_ready:
+            on_ready()
 
     def stop(self):
         self.suspend()

@@ -18,6 +18,11 @@ def config_dir() -> Path:
     return app_dir()
 
 
+def wallpaper_state_path() -> Path:
+    """Windows 원래 바탕화면 복원 정보 (정적 전환 중 비정상 종료돼도 다음 실행에서 복구하기 위한 영구 파일)."""
+    return config_dir() / "wallpaper_state.json"
+
+
 def icon_path() -> str:
     """앱 아이콘(.ico) 경로. 없으면 빈 문자열(→ 시스템 기본 아이콘).
     EXE로 실행하면 EXE 옆의 icon.ico(build.bat이 복사), 개발 중에는 builder/icon.ico."""
@@ -38,6 +43,8 @@ class Settings:
     restore_on_start: bool = True        # 실행 시 마지막 영상을 자동 적용
     autostart: bool = True               # Windows 시작 시 자동 실행 (실행할 때마다 등록을 확인/복구)
     hwdec: str = "auto-safe"             # mpv 하드웨어 디코딩. "no"=끔, "d3d11va" 등 직접 지정 가능
+    static_snapshot: bool = False        # 오래 가려져 있으면 Windows 바탕화면을 영상 첫 프레임으로 바꾸고 mpv를 종료 (실제 시스템 설정을 바꾸므로 기본 꺼짐)
+    snapshot_delay_s: int = 30           # 가려진 뒤 이 시간(초)이 지나야 정적 전환 (창을 열고 닫을 때마다 바탕화면을 바꾸지 않도록)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":
@@ -60,6 +67,8 @@ class Settings:
             s.hwdec = "auto-safe"
         if not (0.0 < s.coverage_threshold <= 1.0):
             s.coverage_threshold = 0.95
+        if s.snapshot_delay_s < 0:
+            s.snapshot_delay_s = 30
         return s
 
     def save(self, path: Path | None = None) -> bool:

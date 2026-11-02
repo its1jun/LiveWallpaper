@@ -32,7 +32,8 @@ INSTANCE_POLL_MS = 200   # 다른 실행 요청(SHOW)을 확인하는 주기
 # 트레이 '옵션' 메뉴: (표시 이름, Settings 속성)
 OPTIONS = [("Optimize videos (screen-size resize, 30fps cap, bitrate cap)", "optimize"),
            ("Pause in battery saver mode", "pause_on_battery_saver"),
-           ("Auto-apply last video on launch", "restore_on_start")]
+           ("Auto-apply last video on launch", "restore_on_start"),
+           ("Static wallpaper while hidden (replaces Windows wallpaper)", "static_snapshot")]
 
 
 class App:
@@ -242,6 +243,7 @@ class App:
         self._set_busy(True)
         w, h = self.root.winfo_screenwidth(), self.root.winfo_screenheight()  # DPI aware → 물리 픽셀
         optimize, codec = self.s.optimize, self.s.video_codec
+        snapshot, fit = self.s.static_snapshot, self.s.fit_mode
 
         def work():
             try:
@@ -249,6 +251,8 @@ class App:
                     res = media.PrepareResult(path, "Original missing: using saved copy")
                 else:
                     res = media.prepare(path, w, h, optimize, codec)
+                if snapshot:   # 정적 전환용 첫 프레임을 미리 만들어 둔다 (실패해도 재생에는 영향 없음)
+                    media.ensure_first_frame(res.path, w, h, fit)
             except Exception as e:  # noqa: BLE001
                 self._later(self._on_prepare_failed, str(e))
             else:
@@ -445,6 +449,7 @@ def main():
         # 앱 UI가 완전히 만들어지기 전 도착한 요청도 큐에 보관된다.
         server = InstanceServer(lambda: instance_events.put("SHOW"))
         app = App(settings, instance_events)
+        app.wall.recover_previous_session()   # 이전 실행이 정적 상태로 끝났다면 원래 바탕화면 복원
         restoring = settings.restore_on_start and bool(app.source())
         if "--tray" in sys.argv and restoring and app.tray and app.tray.ok:  # 복원 실패 시에는 창이 다시 열림
             app.root.withdraw()

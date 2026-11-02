@@ -34,6 +34,10 @@ CODECS = {
 DEFAULT_CODEC = "h264"
 CODEC_LABELS = {k: v["label"] for k, v in CODECS.items()}
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+FRAME_INFIX = ".frame2-"   # cache/<영상>.frame2-<맞춤>-<가로>x<세로>.png = 정적 전환용 첫 프레임 (색 변환 수정 후 형식: 이전 ".frame-" 파일은 정리 때 지워짐)
+
+
+_COLORSPACE_TAG = re.compile(r"\b(?:bt709|bt470bg|bt470m|smpte170m|smpte240m|bt2020nc|bt2020c|fcc|ycgco|ictcp)\b")
 
 
 class MediaError(Exception):
@@ -48,6 +52,7 @@ class VideoInfo:
     fps: float | None
     pix_fmt: str = ""
     bitrate_kbps: int | None = None
+    color_tagged: bool = False   # 영상 파일에 색 변환 규칙(BT.709 등)이 표시되어 있는가
 
 
 @dataclass
@@ -85,10 +90,13 @@ def parse_ffmpeg_info(text: str) -> VideoInfo | None:
         fps = re.search(r"([\d.]+)\s*fps", line)
         pix = re.search(r",\s*((?:yuvj?|nv|p0|gray|gbr|rgb|bgr|pal)\w*)", line[m.end():])
         stream_kbps = re.search(r"(\d+)\s*kb/s", line[m.end():])
+        paren = re.search(r",\s*(?:yuvj?|nv|p0)\w*\(([^)]*)\)", line[m.end():])   # 예: yuv420p(tv, bt709, progressive)
+        tagged = bool(paren and _COLORSPACE_TAG.search(paren.group(1)))
         return VideoInfo(m.group(1), int(size.group(1)), int(size.group(2)),
                          float(fps.group(1)) if fps else None,
                          pix.group(1) if pix else "",
-                         int(stream_kbps.group(1)) if stream_kbps else overall_kbps)
+                         int(stream_kbps.group(1)) if stream_kbps else overall_kbps,
+                         tagged)
     return None
 
 
@@ -188,14 +196,18 @@ def prune_cache(keep, directory: Path | None = None) -> None:
     """
     d = Path(directory or cache_dir())
     keep_set = {_norm(p) for p in keep if p}
+    frame_prefixes = {Path(p).stem + FRAME_INFIX for p in keep if p}   # 유지하는 영상의 첫 프레임 사본
     try:
         entries = list(d.iterdir())
     except OSError:
         return
     for f in entries:
         try:
-            if f.is_file() and _norm(f) not in keep_set:
-                f.unlink()
+            if not f.is_file() or _norm(f) in keep_set:
+                continue
+            if f.suffix == ".png" and ".part" not in f.name and any(f.name.startswith(x) for x in frame_prefixes):
+                continue
+            f.unlink()
         except OSError:
             pass
 
@@ -275,3 +287,72 @@ def prepare(src: str, max_w: int, max_h: int, optimize: bool = True,
         return PrepareResult(str(dst), f"Converted to {CODECS[used]['label']} ({reason}){fallback}")
     note = "" if ffmpeg else "ffmpeg not found: copied without resolution check/optimization"
     return PrepareResult(str(dst), note)
+
+
+# ---------------- 정적 전환용 첫 프레임 ----------------
+def frame_path(video: str, w: int, h: int, fit: str) -> Path:
+    """영상 옆(cache/)에 두는 첫 프레임 PNG 경로. 화면 크기와 맞춤 모드가 이름에 들어가므로 바뀌면 새로 만든다."""
+    p = Path(video)
+    return p.with_name(f"{p.stem}{FRAME_INFIX}{fit}-{w}x{h}.png")
+
+
+def guess_matrix(info: VideoInfo | None) -> str:
+    """YUV → RGB 변환 규칙. mpv와 같은 결과가 되도록 정한다.
+
+    영상에 규칙이 표시돼 있으면 ffmpeg가 그대로 따르므로 "auto". 표시가 없을 때 ffmpeg는 항상 BT.601로 가정하지만
+    mpv는 해상도로 추측한다(HD면 BT.709). 그래서 표시가 없는 YUV 영상은 mpv와 같은 기준으로 직접 정한다.
+    Uncertain: mpv의 정확한 경계값(가로 1280 초과 또는 세로 576 초과 → BT.709)은 mpv 소스를 확인하지 못했다.
+    """
+    if not info or info.color_tagged or not info.pix_fmt.startswith(("yuv", "nv", "p0")):
+        return "auto"
+    return "bt709" if info.width > 1280 or info.height > 576 else "bt601"
+
+
+def frame_filter(w: int, h: int, fit: str, matrix: str = "auto") -> str:
+    """mpv의 맞춤 모드와 같은 결과가 되도록 화면 크기(w x h)의 이미지로 만드는 ffmpeg 필터.
+
+    맨 앞에서 먼저 RGB로 바꾼다: 크기 조절·여백(pad)을 YUV 상태로 한 뒤 마지막에 RGB로 바꾸면
+    그 마지막 변환은 규칙이 없는 것으로 보고 항상 BT.601을 쓰기 때문이다.
+    """
+    head = f"scale=in_color_matrix={matrix},format=rgb24,"
+    if fit == "cover":
+        return head + f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
+    if fit == "stretch":
+        return head + f"scale={w}:{h}"
+    return (head + f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+            f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black")
+
+
+def build_frame_command(ffmpeg: str, src: str, dst: str, w: int, h: int, fit: str,
+                        matrix: str = "auto") -> list[str]:
+    return [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", src,
+            "-vf", frame_filter(w, h, fit, matrix), "-frames:v", "1", dst]
+
+
+def ensure_first_frame(video: str, w: int, h: int, fit: str) -> str:
+    """영상의 첫 프레임을 화면 크기 PNG로 만들어 경로를 돌려준다 (이미 있으면 그대로). 실패하면 빈 문자열.
+
+    실패해도 예외를 내지 않는다: 정적 전환은 부가 기능이라 재생 자체를 막으면 안 된다.
+    """
+    if not video or not os.path.isfile(video) or w <= 0 or h <= 0:
+        return ""
+    dst = frame_path(video, w, h, fit)
+    if dst.is_file():
+        return str(dst)
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        return ""
+    tmp = dst.with_name(dst.stem + ".part.png")
+    try:
+        matrix = guess_matrix(probe(video, ffmpeg))
+        r = subprocess.run(build_frame_command(ffmpeg, video, str(tmp), w, h, fit, matrix),
+                           capture_output=True, text=True, errors="replace",
+                           timeout=60, creationflags=_NO_WINDOW)
+        if r.returncode != 0 or not tmp.is_file():
+            tmp.unlink(missing_ok=True)
+            return ""
+        os.replace(tmp, dst)
+    except (OSError, subprocess.SubprocessError):
+        tmp.unlink(missing_ok=True)
+        return ""
+    return str(dst)
