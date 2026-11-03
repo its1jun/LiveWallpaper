@@ -20,14 +20,13 @@ import winapi
 from instance import InstanceServer, request_instance_show
 from config import Settings, icon_path
 from player import FIT_MODES, Player
+from tkbridge import TkBridge
 from wallpaper import Wallpaper
 
 VIDEO_TYPES = [("Video/Image", "*.mp4 *.m4v *.mov *.webm *.mkv *.avi *.wmv *.gif *.webp *.apng"),
                ("All files", "*.*")]
 
 MORE_CLOSED, MORE_OPEN = "More \u2228", "More \u2227"   # More v / More ^
-
-INSTANCE_POLL_MS = 200   # 다른 실행 요청(SHOW)을 확인하는 주기
 
 # 트레이 '옵션' 메뉴: (표시 이름, Settings 속성)
 OPTIONS = [("Optimize videos (screen-size resize, 30fps cap, bitrate cap)", "optimize"),
@@ -47,6 +46,8 @@ class App:
         self._instance_events = instance_events  # IPC 스레드와 Tk 메인 스레드 사이의 안전한 큐
 
         self.root = root = tk.Tk()
+        # 트레이/WinEvent 같은 네이티브 콜백에서는 tkinter를 직접 부르지 않고 이 다리를 거친다 (tkbridge.py 참고)
+        self._bridge = TkBridge(root)
         self._seen_errors = set()
         root.report_callback_exception = self._on_callback_error  # exe에서는 콘솔이 없어 오류가 사라지므로 오류 창으로 알림
         root.title("LiveWallpaper")
@@ -93,7 +94,7 @@ class App:
         self.preview = Player(self.preview_frame.winfo_id(), settings.fit_mode, settings.hwdec,
                               lambda _t: self._later(self.path_var.set, "Unable to read the video."))
         self.wall = Wallpaper(root, settings, lambda t: self._warn("Playback failed", t), self._on_status,
-                         lambda p: self._auto_apply(p))
+                              lambda p: self._auto_apply(p), bridge=self._bridge)
 
         # 미리보기: 창이 숨겨지거나 최소화되면 재생을 멈추고 디코더 해제
         root.bind("<Unmap>", lambda e: self.preview.suspend() if e.widget is root else None)
@@ -103,8 +104,9 @@ class App:
             self._build_tray()
         except Exception:  # noqa: BLE001  트레이를 못 만들면 창 닫기 = 종료
             self.tray = None
-        # Named Pipe 요청은 큐에만 넣고, 실제 Tk 작업은 메인 스레드에서 처리한다.
-        self._instance_poll = self.root.after(INSTANCE_POLL_MS, self._process_instance_events)
+        # Named Pipe 요청은 큐에 넣고 메인 스레드를 깨워서(wake_instance_events) 처리한다. 주기 확인은 하지 않는다.
+        # 창이 만들어지기 전에 이미 도착한 요청이 있을 수 있으므로 mainloop가 시작되면 한 번 비운다.
+        self.root.after(0, self._process_instance_events)
         self._refresh_buttons()
 
     def source(self) -> str:
@@ -144,10 +146,10 @@ class App:
                     self.show_window()
         except queue.Empty:
             pass
-        try:
-            self._instance_poll = self.root.after(INSTANCE_POLL_MS, self._process_instance_events)
-        except tk.TclError:
-            self._instance_poll = None
+
+    def wake_instance_events(self):
+        """IPC 스레드가 큐에 요청을 넣은 직후 부른다: 메인 스레드에서 큐를 비우도록 깨운다."""
+        self._later(self._process_instance_events)
 
     # ---- 스레드 ----
     def _later(self, fn, *args):
@@ -157,9 +159,9 @@ class App:
         except (RuntimeError, tk.TclError):
             pass
 
-    # ---- 트레이 (콜백은 tk 스레드에서 호출됨. 창을 없애는 동작이 있어 after로 한 템포 미룬다) ----
+    # ---- 트레이 (콜백은 Windows 메시지 처리 중에 불린다. 여기서 tkinter를 직접 부르면 안 되므로 다리를 거쳐 tk 스레드에서 실행) ----
     def _post(self, fn):
-        return lambda: self.root.after(0, fn)
+        return lambda: self._bridge.post(fn)
 
     def _menu(self):
         """트레이 메뉴를 열 때마다 호출 → 체크 표시가 항상 최신."""
@@ -187,6 +189,8 @@ class App:
     def _set(self, attr, value):
         setattr(self.s, attr, value)
         self.s.save()
+        if attr in ("pause_on_battery_saver", "static_snapshot"):
+            self.wall.refresh()   # 주기 검사가 없으므로, 가림 판단에 쓰이는 옵션이 바뀌면 바로 다시 판단
 
     def _on_status(self, text):
         self._tooltip(text)
@@ -228,6 +232,7 @@ class App:
                 if self.tray:
                     self.tray.close()
             finally:
+                self._bridge.close()
                 self.root.destroy()
 
     def _warn(self, title, text):
@@ -446,8 +451,14 @@ def main():
             winapi.set_autostart(True)  # 폴더를 옮기거나 파이썬 경로가 바뀌어도 매 실행 때 복구
 
         instance_events = queue.Queue()
-        # 앱 UI가 완전히 만들어지기 전 도착한 요청도 큐에 보관된다.
-        server = InstanceServer(lambda: instance_events.put("SHOW"))
+        app = None
+
+        def on_show():   # IPC 스레드에서 호출됨
+            instance_events.put("SHOW")   # 앱 UI가 완전히 만들어지기 전 도착한 요청도 큐에 보관된다
+            if app is not None:
+                app.wake_instance_events()
+
+        server = InstanceServer(on_show)
         app = App(settings, instance_events)
         app.wall.recover_previous_session()   # 이전 실행이 정적 상태로 끝났다면 원래 바탕화면 복원
         restoring = settings.restore_on_start and bool(app.source())

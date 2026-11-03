@@ -43,7 +43,7 @@ class Settings:
     restore_on_start: bool = True        # 실행 시 마지막 영상을 자동 적용
     autostart: bool = True               # Windows 시작 시 자동 실행 (실행할 때마다 등록을 확인/복구)
     hwdec: str = "auto-safe"             # mpv 하드웨어 디코딩. "no"=끔, "d3d11va" 등 직접 지정 가능
-    static_snapshot: bool = True        # 오래 가려져 있으면 Windows 바탕화면을 영상 첫 프레임으로 바꾸고 mpv를 종료
+    static_snapshot: bool = True         # 오래 가려져 있으면 Windows 바탕화면을 영상 첫 프레임으로 바꾸고 mpv를 종료 (실제 시스템 설정을 바꾸지만 원래대로 복원함. 트레이 '옵션'에서 끌 수 있음)
     snapshot_delay_s: int = 30           # 가려진 뒤 이 시간(초)이 지나야 정적 전환 (창을 열고 닫을 때마다 바탕화면을 바꾸지 않도록)
 
     @classmethod

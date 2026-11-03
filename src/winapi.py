@@ -2,7 +2,7 @@
 
   1. 창 만들기/부착   create_host_window, attach_to_desktop   ← Windows 업데이트로 깨지면 여기만 수정
   2. 가림 판단        desktop_is_covered, covered_ratio
-  3. 시스템 상태      notification_state, power_status, DisplayWatcher(모니터 켜짐/꺼짐)
+  3. 시스템 상태      notification_state, power_status, SystemWatcher(창/전원/세션 변화를 알림으로 받음)
   4. 트레이 아이콘    Tray
   5. 단일 실행 잠금   acquire_instance / release_instance
   6. 시작 프로그램    autostart_*
@@ -23,6 +23,7 @@ shell32 = ctypes.WinDLL("shell32")
 shcore = ctypes.WinDLL("shcore")
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32")
+wtsapi32 = ctypes.WinDLL("wtsapi32")
 
 WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
@@ -163,6 +164,20 @@ def create_host_window() -> int:
     """mpv가 그릴 검은 창(HWND). 아직 숨김 상태이며 attach_to_desktop()이 부착하고 보여준다. 실패하면 0."""
     return _create(WS_EX_TOOLWINDOW, WS_POPUP,
                    None, (user32.GetSystemMetrics(SM_CXSCREEN), user32.GetSystemMetrics(SM_CYSCREEN)))
+
+
+PUMP_SENT_MESSAGES = False   # Uncertain: True로 하면 Tk 콜백 안에서 네이티브 메시지를 처리해 재진입 위험이 있다 (미검증)
+
+
+def pump_sent_messages():
+    """다른 스레드가 이 스레드의 창에 보낸 동기 메시지(SendMessage)를 처리한다 (player.suspend가 호출).
+    원래는 이 함수가 없어서 호출이 조용히 실패(AttributeError가 삼켜짐)하고 있었다. 한 번 구현해 켰더니
+    Tk 콜백 안에서 네이티브 메시지가 처리되는 경로가 늘어나므로, 크래시 원인이 확인될 때까지 꺼 둔다
+    (= 원래와 같은 동작). 켜려면 PUMP_SENT_MESSAGES = True."""
+    if not PUMP_SENT_MESSAGES:
+        return
+    msg = wintypes.MSG()
+    user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)  # PM_NOREMOVE: 대기 중인 '보낸' 메시지만 처리됨
 
 
 def host_alive(hwnd: int) -> bool:
@@ -497,38 +512,109 @@ class _GUID(ctypes.Structure):
                 ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
 
 
-class DisplayWatcher:
-    """모니터 켜짐/꺼짐 알림. callback(is_on: bool)이 메시지를 처리하는 스레드(= tk 메인 스레드)에서 호출됨.
-    숨은 메시지 전용 창을 쓰며, 배경화면이 실행 중일 때만 만들고 close()로 정리한다."""
+# WinEvent 훅: 다른 프로세스의 창 변화를 알림으로 받는다 (주기적으로 EnumWindows를 돌리지 않기 위함).
+WINEVENTPROC = ctypes.WINFUNCTYPE(None, wintypes.HANDLE, wintypes.DWORD, wintypes.HWND,
+                                  wintypes.LONG, wintypes.LONG, wintypes.DWORD, wintypes.DWORD)
+user32.SetWinEventHook.restype = wintypes.HANDLE
+user32.SetWinEventHook.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE, WINEVENTPROC,
+                                   wintypes.DWORD, wintypes.DWORD, wintypes.DWORD]
+user32.UnhookWinEvent.restype = wintypes.BOOL
+user32.UnhookWinEvent.argtypes = [wintypes.HANDLE]
+wtsapi32.WTSRegisterSessionNotification.restype = wintypes.BOOL
+wtsapi32.WTSRegisterSessionNotification.argtypes = [_HWND, wintypes.DWORD]
+wtsapi32.WTSUnRegisterSessionNotification.restype = wintypes.BOOL
+wtsapi32.WTSUnRegisterSessionNotification.argtypes = [_HWND]
 
-    def __init__(self, callback):
-        self._hwnd = _create(0, 0, HWND_MESSAGE, (0, 0))
-        self._handle = None
-        if self._hwnd:
-            def hook(msg, wparam, lparam):
-                if msg == WM_POWERBROADCAST and wparam == PBT_POWERSETTINGCHANGE:
-                    # POWERBROADCAST_SETTING: GUID(16) + DataLength(4) + Data. 0=꺼짐 1=켜짐 2=어두워짐
-                    if ctypes.string_at(lparam, 16) == _DISPLAY_GUID_BYTES:
-                        callback(ctypes.string_at(lparam + 20, 1)[0] != 0)
-                    return 1
-                return None
-            try:
-                _hooks[self._hwnd] = hook
-                guid = _GUID.from_buffer_copy(_DISPLAY_GUID_BYTES)
-                self._handle = user32.RegisterPowerSettingNotification(self._hwnd, ctypes.byref(guid), 0)
-            except Exception:  # noqa: BLE001  생성 도중 실패하면 만든 창/hook을 남기지 않는다
-                self.close()
-                raise
+WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS = 0x0, 0x2   # 우리 프로세스(설정 창)의 이벤트는 받지 않음
+OBJID_WINDOW, CHILDID_SELF = 0, 0
+# 필요한 이벤트 범위만 따로 구독한다 (범위를 넓게 잡으면 메뉴/캡처 같은 불필요한 이벤트까지 온다).
+_WIN_EVENT_RANGES = (
+    (0x0003, 0x0003),   # EVENT_SYSTEM_FOREGROUND     포그라운드 창이 바뀜 (전체화면 앱 실행 포함)
+    (0x000B, 0x000B),   # EVENT_SYSTEM_MOVESIZEEND    창 이동/크기 조절이 끝남
+    (0x0016, 0x0017),   # EVENT_SYSTEM_MINIMIZESTART/END
+    (0x8002, 0x8003),   # EVENT_OBJECT_SHOW / HIDE    창이 보이거나 숨겨짐 (화면보호기 포함)
+    (0x800B, 0x800B),   # EVENT_OBJECT_LOCATIONCHANGE 최대화/복원/스냅 등 위치·크기 변화
+    (0x8017, 0x8018),   # EVENT_OBJECT_CLOAKED/UNCLOAKED 가상 데스크톱 전환 등
+)
+WM_SETTINGCHANGE, WM_DISPLAYCHANGE, WM_WTSSESSION_CHANGE = 0x001A, 0x007E, 0x02B1
+PBT_APMSUSPEND, PBT_APMRESUMESUSPEND, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC = 0x4, 0x7, 0xA, 0x12
+
+
+class SystemWatcher:
+    """바탕화면이 보이는지에 영향을 주는 변화를 알림으로 받는다 (예전의 1~2초 주기 검사를 대신함).
+
+      on_display(is_on: bool)   모니터 켜짐/꺼짐
+      on_change()               그 밖의 변화: 포그라운드/최소화/최대화/창 표시·숨김/가상 데스크톱 전환,
+                                화면 잠금·해제, 전원 상태·절전 복귀, 해상도·작업 영역 변경, 탐색기 재시작
+
+    두 콜백 모두 메시지를 처리하는 스레드(= tk 메인 스레드)에서 호출된다. on_change는 짧은 시간에 여러 번
+    올 수 있으므로 받는 쪽에서 합쳐서 처리해야 한다. 숨은 최상위 창 하나를 쓰며(브로드캐스트 메시지는
+    메시지 전용 창에는 오지 않는다), 배경화면이 실행 중일 때만 만들고 close()로 정리한다.
+    Uncertain: 배터리 절약 모드 켜짐/꺼짐이 PBT_APMPOWERSTATUSCHANGE로 오는지는 Windows 실기기에서 미검증."""
+
+    def __init__(self, on_display, on_change):
+        self._on_display, self._on_change = on_display, on_change
+        self._power = None
+        self._hooks = []
+        self._wts = False
+        self._proc = WINEVENTPROC(self._on_win_event)   # GC 되지 않도록 보관
+        self._hwnd = _create(0, WS_POPUP, None, (0, 0))   # 한 번도 show하지 않으므로 보이지 않는다
+        if not self._hwnd:
+            return
+        try:
+            _hooks[self._hwnd] = self._on_message
+            guid = _GUID.from_buffer_copy(_DISPLAY_GUID_BYTES)
+            self._power = user32.RegisterPowerSettingNotification(self._hwnd, ctypes.byref(guid), 0)
+            for lo, hi in _WIN_EVENT_RANGES:
+                h = user32.SetWinEventHook(lo, hi, None, self._proc, 0, 0,
+                                           WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS)
+                if h:
+                    self._hooks.append(h)
+            self._wts = bool(wtsapi32.WTSRegisterSessionNotification(self._hwnd, 0))  # 0 = 이 세션만
+        except Exception:  # noqa: BLE001  생성 도중 실패하면 만든 창/hook을 남기지 않는다
+            self.close()
+            raise
 
     @property
     def ok(self) -> bool:
-        return bool(self._handle)
+        """모든 알림을 받을 수 있는가. False면 쓰는 쪽이 비상 폴링으로 대신해야 한다."""
+        return bool(self._hwnd and self._power and len(self._hooks) == len(_WIN_EVENT_RANGES))
+
+    def _on_win_event(self, _hook, _event, hwnd, id_object, id_child, _tid, _time):
+        # 아주 자주 불리므로 가장 싼 검사부터: 창 자체의 이벤트만 (커서/캐럿/하위 개체 제외)
+        if hwnd and id_object == OBJID_WINDOW and id_child == CHILDID_SELF:
+            try:
+                self._on_change()
+            except Exception:  # noqa: BLE001  콜백 예외가 Windows 쪽으로 새면 안 됨
+                pass
+
+    def _on_message(self, msg, wparam, lparam):
+        if msg == WM_POWERBROADCAST:
+            if wparam == PBT_POWERSETTINGCHANGE:
+                # POWERBROADCAST_SETTING: GUID(16) + DataLength(4) + Data. 0=꺼짐 1=켜짐 2=어두워짐
+                if ctypes.string_at(lparam, 16) == _DISPLAY_GUID_BYTES:
+                    self._on_display(ctypes.string_at(lparam + 20, 1)[0] != 0)
+                return 1
+            if wparam in (PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND):
+                self._on_change()
+                return 1
+            return None
+        if msg in (WM_WTSSESSION_CHANGE, WM_DISPLAYCHANGE, WM_SETTINGCHANGE) \
+                or (_WM_TASKBAR_CREATED and msg == _WM_TASKBAR_CREATED):
+            self._on_change()
+        return None
 
     def close(self):
-        if self._handle:
-            user32.UnregisterPowerSettingNotification(self._handle)
-            self._handle = None
+        for h in self._hooks:
+            user32.UnhookWinEvent(h)
+        self._hooks = []
+        if self._power:
+            user32.UnregisterPowerSettingNotification(self._power)
+            self._power = None
         if self._hwnd:
+            if self._wts:
+                wtsapi32.WTSUnRegisterSessionNotification(self._hwnd)
+                self._wts = False
             _hooks.pop(self._hwnd, None)
             user32.DestroyWindow(self._hwnd)
             self._hwnd = 0

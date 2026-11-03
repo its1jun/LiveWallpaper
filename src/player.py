@@ -75,6 +75,44 @@ def core_options(hwdec: str) -> dict:
     )
 
 
+# libmpv 이벤트 번호 (client.h의 mpv_event_id). 앱이 쓰지 않는 이벤트는 큐에 쌓이지 않게 끈다.
+# 쓰는 클라이언트가 없는 큐에 계속 쌓이면 가득 차서 "Too many events queued"가 나온다.
+_EV_START_FILE, _EV_END_FILE, _EV_FILE_LOADED = 6, 7, 8
+_EV_IDLE, _EV_PAUSE, _EV_UNPAUSE, _EV_TICK = 11, 12, 13, 14            # 구버전 호환용(deprecated) 이벤트
+_EV_VIDEO_RECONFIG, _EV_AUDIO_RECONFIG, _EV_METADATA_UPDATE = 17, 18, 19
+_EV_SEEK, _EV_PLAYBACK_RESTART, _EV_CHAPTER_CHANGE = 20, 21, 23
+# 이벤트를 아무도 꺼내 가지 않는 기본 핸들("main"): 선택 이벤트를 모두 끈다.
+_OFF_MAIN = (_EV_START_FILE, _EV_END_FILE, _EV_FILE_LOADED, _EV_IDLE, _EV_PAUSE, _EV_UNPAUSE, _EV_TICK,
+             _EV_VIDEO_RECONFIG, _EV_AUDIO_RECONFIG, _EV_METADATA_UPDATE, _EV_SEEK, _EV_PLAYBACK_RESTART,
+             _EV_CHAPTER_CHANGE)
+# python-mpv의 이벤트 스레드가 읽는 핸들: playback-restart(on_ready)와 파일 시작/끝은 남기고, 반복 재생이나
+# 일시정지/재개 때마다 생기는 이벤트만 끈다.
+_OFF_EVENT = (_EV_IDLE, _EV_PAUSE, _EV_UNPAUSE, _EV_TICK, _EV_VIDEO_RECONFIG, _EV_AUDIO_RECONFIG,
+              _EV_METADATA_UPDATE, _EV_SEEK, _EV_CHAPTER_CHANGE)
+
+
+def trim_events(mpv, p) -> tuple:
+    """쓰지 않는 mpv 이벤트를 끈다. 반환: (끈 수, 실패 수). 실패해도 재생에는 영향이 없다.
+    Uncertain: python-mpv의 내부 이름(_mpv_request_event, _event_handle)에 의존한다. 이름이 없거나
+    호출이 실패하면 아무것도 끄지 않고 (0, 실패 수)를 돌려준다 (이벤트 제한이 없던 예전 동작과 같다)."""
+    request = getattr(mpv, "_mpv_request_event", None)
+    done = failed = 0
+    if request is None:
+        return 0, 1
+    for handle, events in ((getattr(p, "handle", None), _OFF_MAIN),
+                           (getattr(p, "_event_handle", None), _OFF_EVENT)):
+        if handle is None:
+            failed += 1
+            continue
+        for ev in events:
+            try:
+                request(handle, ev, 0)   # mpv_request_event(handle, id, enable=0)
+                done += 1
+            except Exception:  # noqa: BLE001  번호를 모르는 구버전/ctypes 형 불일치 등
+                failed += 1
+    return done, failed
+
+
 def _apply_fit(player, mode: str):
     player.keepaspect = mode != "stretch"
     player.panscan = 1.0 if mode == "cover" else 0.0
@@ -93,6 +131,7 @@ class Player:
         self._paused = False
         self._reported = False
         self._on_ready = None       # resume(on_ready)로 받은 콜백 (mpv 스레드에서 호출됨)
+        self.trimmed = (0, 0)       # trim_events 결과 (끈 이벤트 수, 실패 수)
 
     # ---- 내부 ----
     def _ensure_player(self) -> bool:
@@ -114,6 +153,7 @@ class Player:
                 return False
         _apply_fit(self._player, self._fit)
         self._register_events(self._player)
+        self.trimmed = trim_events(mpv, self._player)   # (끈 이벤트 수, 실패 수) — 진단용
         return True
 
     def _register_events(self, p):
