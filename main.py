@@ -57,7 +57,7 @@ class App:
             except tk.TclError:
                 pass                           # 아이콘 파일이 깨져도 기본 아이콘으로 계속 실행
         root.geometry("560x480")
-        root.minsize(420, 320)
+        root.minsize(560, 480)
         root.protocol("WM_DELETE_WINDOW", self.close_window)
 
         self.preview_frame = tk.Frame(root, bg="black", height=260)
