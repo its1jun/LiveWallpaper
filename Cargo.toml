@@ -1,0 +1,21 @@
+[package]
+name = "livewallpaper"
+version = "1.0.0"
+edition = "2021"
+build = "builder/build.rs"
+description = "Low-load live wallpaper for Windows (libmpv)"
+
+[[bin]]
+name = "LiveWallpaper"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"   # lookaround 금지 (D6)
+sha1 = "0.10"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
