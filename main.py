@@ -56,8 +56,8 @@ class App:
                 root.iconbitmap(icon_path())   # 설정 창/작업 표시줄 아이콘
             except tk.TclError:
                 pass                           # 아이콘 파일이 깨져도 기본 아이콘으로 계속 실행
-        root.geometry("560x480")
-        root.minsize(560, 480)
+        root.geometry("560x440")
+        root.minsize(560, 440)
         root.protocol("WM_DELETE_WINDOW", self.close_window)
 
         self.preview_frame = tk.Frame(root, bg="black", height=260)
