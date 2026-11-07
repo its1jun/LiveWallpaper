@@ -1,4 +1,5 @@
 # Tree
+```text
 LiveWallpaper
 │   Cargo.toml
 │   README.md
@@ -43,7 +44,7 @@ LiveWallpaper
             tray.rs
             util.rs
             watcher.rs
-
+```
 # Building LiveWallpaper (Windows)
 
 ## Requirements
