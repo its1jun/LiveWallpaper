@@ -1,3 +1,49 @@
+# Tree
+LiveWallpaper
+│   Cargo.toml
+│   README.md
+│
+├───builder
+│       build.bat
+│       build.rs
+│       build_installer.bat
+│       icon.ico
+│       installer.iss
+│
+├───libs
+│       libmpv-2.dll
+│
+└───src
+    │   config.rs
+    │   instance.rs
+    │   main.rs
+    │   mpv_sys.rs
+    │   player.rs
+    │   snapshot.rs
+    │   sync.rs
+    │   ui.rs
+    │   wallpaper.rs
+    │   wallpaper_logic.rs
+    │
+    ├───app
+    │       mod.rs
+    │       window.rs
+    │
+    ├───media
+    │       mod.rs
+    │       pure.rs
+    │
+    └───win
+            autostart.rs
+            consts.rs
+            cover.rs
+            ffi.rs
+            host.rs
+            mod.rs
+            tray.rs
+            util.rs
+            watcher.rs
+
 # Building LiveWallpaper (Windows)
 
 ## Requirements
