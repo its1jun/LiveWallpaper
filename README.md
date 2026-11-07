@@ -1,4 +1,4 @@
-# Tree
+# Directory Tree
 ```text
 LiveWallpaper
 ├── Cargo.toml
