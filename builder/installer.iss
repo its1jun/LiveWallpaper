@@ -11,7 +11,7 @@ AppName=LiveWallpaper
 AppVersion={#AppVersion}
 DefaultDirName={autopf}\LiveWallpaper
 DefaultGroupName=LiveWallpaper
-; 사용자 단위 설치: 관리자 권한 불필요 ({autopf}가 %LOCALAPPDATA%\Programs로 풀려 설정/캐시를 {app}에 쓸 수 있음, 자동 시작은 HKCU 에 저장됨)
+; 사용자 단위 설치: 관리자 권한 불필요 ({autopf}가 %LOCALAPPDATA%\Programs로 풀림). 설정/캐시는 {app}이 아니라 %LOCALAPPDATA%\LiveWallpaper 에 저장되고, 자동 시작은 HKCU 에 저장됨
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -70,12 +70,19 @@ begin
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  R: Integer;
 begin
   if CurUninstallStep = usUninstall then
+  begin
     KillApp;
+    { 정적 모드에서 제거하면 바탕화면이 캐시 이미지를 가리킨 채 남을 수 있으므로 원래 바탕화면으로 복원 }
+    Exec(ExpandConstant('{app}\LiveWallpaper.exe'), '--restore-wallpaper', '', SW_HIDE, ewWaitUntilTerminated, R);
+  end;
   if CurUninstallStep = usPostUninstall then
     if MsgBox(ExpandConstant('{cm:DeleteUserData}'), mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
     begin
+      // 이전(포터블) 버전이 app 폴더에 남긴 데이터 정리
       DelTree(ExpandConstant('{app}\cache'), True, True, True);
       DeleteFile(ExpandConstant('{app}\config.json'));
       DeleteFile(ExpandConstant('{app}\config.tmp'));

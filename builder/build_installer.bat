@@ -5,10 +5,13 @@ rem ============================================================
 rem LiveWallpaper installer only: builder\installer.iss -> Inno Setup
 rem Prerequisite: run build.bat first (builder\dist\LiveWallpaper must exist).
 rem ============================================================
-set VERSION=1.0.0
+rem VERSION is read from Cargo.toml ([package] version) so it is defined in one place.
+set "VERSION=1.0.0"
 rem CLEAN_DIST: 1 = delete builder\dist after the installer was built
 set CLEAN_DIST=0
 cd /d "%~dp0.."
+for /f "tokens=3 delims= " %%V in ('findstr /b /c:"version = " Cargo.toml') do set "VERSION=%%~V"
+echo Version: %VERSION%
 
 if not exist "builder\dist\LiveWallpaper\LiveWallpaper.exe" (
     echo [ERROR] builder\dist\LiveWallpaper is missing. Run build.bat first.

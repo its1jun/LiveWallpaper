@@ -2,6 +2,7 @@
 name = "livewallpaper"
 version = "1.0.0"
 edition = "2021"
+rust-version = "1.79"
 build = "builder/build.rs"
 description = "Low-load live wallpaper for Windows (libmpv)"
 

@@ -38,7 +38,7 @@ rem ffmpeg.exe: if libs\ffmpeg.exe was not provided, fetch the one bundled in th
 rem imageio-ffmpeg (same source the Python version uses) and put it next to the exe in dist.
 if exist "builder\dist\LiveWallpaper\libs\ffmpeg.exe" goto :ffmpeg_ok
 echo [ffmpeg] libs\ffmpeg.exe not found. Fetching it from the imageio-ffmpeg pip package...
-python -m pip install --quiet --disable-pip-version-check imageio-ffmpeg
+python -m pip install --quiet --disable-pip-version-check imageio-ffmpeg==0.6.0
 if errorlevel 1 goto :ffmpeg_warn
 python -c "import imageio_ffmpeg,shutil,sys; shutil.copyfile(imageio_ffmpeg.get_ffmpeg_exe(), sys.argv[1])" "builder\dist\LiveWallpaper\libs\ffmpeg.exe"
 if errorlevel 1 goto :ffmpeg_warn
@@ -47,6 +47,10 @@ goto :ffmpeg_ok
 echo [WARNING] ffmpeg.exe could not be bundled. Static wallpaper / GIF / optimization will not work.
 echo           Install Python + "pip install imageio-ffmpeg", or put ffmpeg.exe in libs\ and rebuild.
 :ffmpeg_ok
+if exist "builder\dist\LiveWallpaper\libs\ffmpeg.exe" (
+    echo [ffmpeg] Video encoders available in the bundled ffmpeg:
+    "builder\dist\LiveWallpaper\libs\ffmpeg.exe" -hide_banner -encoders 2>nul | findstr /i "libx264 libx265 libsvtav1 libaom"
+)
 copy /y "builder\icon.ico" "builder\dist\LiveWallpaper\icon.ico" >nul
 if errorlevel 1 goto :fail
 if exist "README.md" copy /y "README.md" "builder\dist\LiveWallpaper\README.md" >nul
