@@ -1,17 +1,17 @@
 # Directory Tree
 ```text
-LiveWallpaper
+LiveWallpaper/
 ├── Cargo.toml
 ├── README.md
-├── builder
+├── builder/
 │   ├── build.bat
 │   ├── build.rs
 │   ├── build_installer.bat
 │   ├── icon.ico
 │   └── installer.iss
-├── libs
+├── libs/
 │   └── libmpv-2.dll
-└── src
+└── src/
     ├── config.rs
     ├── instance.rs
     ├── main.rs
@@ -22,13 +22,13 @@ LiveWallpaper
     ├── ui.rs
     ├── wallpaper.rs
     ├── wallpaper_logic.rs
-    ├── app
+    ├── app/
     │   ├── mod.rs
     │   └── window.rs
-    ├── media
+    ├── media/
     │   ├── mod.rs
     │   └── pure.rs
-    └── win
+    └── win/
         ├── autostart.rs
         ├── consts.rs
         ├── cover.rs
